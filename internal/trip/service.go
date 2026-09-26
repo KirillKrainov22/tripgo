@@ -17,24 +17,31 @@ type Repository interface {
 	Get(ctx context.Context, id uuid.UUID) (Trip, error)
 	Finish(ctx context.Context, id uuid.UUID, at time.Time) (Trip, error)
 	RecordStatus(ctx context.Context, id uuid.UUID, from *string, to string, at time.Time) error
+	ReserveCreation(ctx context.Context, key uuid.UUID, candidate Trip, ttl time.Duration) (stored Trip, claimed bool, err error)
 }
 
 type Service struct {
-	repository Repository
-	tx         TxManager
+	repository     Repository
+	tx             TxManager
+	idempotencyTTL time.Duration
 }
 
-func NewService(repository Repository, tx TxManager) *Service {
-	return &Service{repository: repository, tx: tx}
+func NewService(repository Repository, tx TxManager, idempotencyTTL time.Duration) *Service {
+	return &Service{repository: repository, tx: tx, idempotencyTTL: idempotencyTTL}
 }
 
-func (s *Service) Create(ctx context.Context, data Data) (Trip, error) {
+type CreateResult struct {
+	Trip     Trip
+	Replayed bool
+}
+
+func (s *Service) Create(ctx context.Context, data Data, key *uuid.UUID) (CreateResult, error) {
 	if err := data.Validate(); err != nil {
-		return Trip{}, err
+		return CreateResult{}, err
 	}
 	id, err := uuid.NewRandom()
 	if err != nil {
-		return Trip{}, fmt.Errorf("generate trip ID: %w", err)
+		return CreateResult{}, fmt.Errorf("generate trip ID: %w", err)
 	}
 	created := Trip{
 		Data:      data,
@@ -42,18 +49,36 @@ func (s *Service) Create(ctx context.Context, data Data) (Trip, error) {
 		Status:    Active,
 		StartedAt: time.Now().UTC().Truncate(time.Microsecond),
 	}
+	var result CreateResult
 	err = s.tx.Do(ctx, func(ctx context.Context) error {
+		if key != nil {
+			stored, claimed, err := s.repository.ReserveCreation(ctx, *key, created, s.idempotencyTTL)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				if stored.Data != data {
+					return ErrIdempotencyConflict
+				}
+				result = CreateResult{Trip: stored, Replayed: true}
+				return nil
+			}
+		}
 		var err error
 		created, err = s.repository.Create(ctx, created)
 		if err != nil {
 			return err
 		}
-		return s.repository.RecordStatus(ctx, created.ID, nil, Active, created.StartedAt)
+		if err := s.repository.RecordStatus(ctx, created.ID, nil, Active, created.StartedAt); err != nil {
+			return err
+		}
+		result.Trip = created
+		return nil
 	})
 	if err != nil {
-		return Trip{}, fmt.Errorf("create trip: %w", err)
+		return CreateResult{}, fmt.Errorf("create trip: %w", err)
 	}
-	return created, nil
+	return result, nil
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (Trip, error) {

@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	ErrInvalidRequest = errors.New("invalid request")
-	ErrNotFound       = errors.New("trip not found")
-	ErrDriverBusy     = errors.New("driver already has an active trip")
-	ErrCompleted      = errors.New("trip is already completed")
+	ErrInvalidRequest      = errors.New("invalid request")
+	ErrNotFound            = errors.New("trip not found")
+	ErrDriverBusy          = errors.New("driver already has an active trip")
+	ErrCompleted           = errors.New("trip is already completed")
+	ErrIdempotencyConflict = errors.New("idempotency key was used with different trip data")
 )
 
 const (

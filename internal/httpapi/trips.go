@@ -15,19 +15,23 @@ import (
 
 const maxRequestBytes = 1 << 20
 
-func (h *handler) CreateTrip(w http.ResponseWriter, r *http.Request, _ api.CreateTripParams) {
+func (h *handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.CreateTripParams) {
 	data, err := decodeTripData(w, r)
 	if err != nil {
 		h.handleError(w, r, err)
 		return
 	}
-	value, err := h.trips.Create(r.Context(), data)
+	result, err := h.trips.Create(r.Context(), data, params.IdempotencyKey)
 	if err != nil {
 		h.handleError(w, r, err)
 		return
 	}
-	w.Header().Set("Location", "/api/v1/trips/"+value.ID.String())
-	h.writeJSON(w, http.StatusCreated, toAPITrip(value))
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	w.Header().Set("Location", "/api/v1/trips/"+result.Trip.ID.String())
+	h.writeJSON(w, status, toAPITrip(result.Trip))
 }
 
 func (h *handler) GetTrip(w http.ResponseWriter, r *http.Request, id api.TripId) {
@@ -123,6 +127,8 @@ func (h *handler) handleError(w http.ResponseWriter, r *http.Request, err error)
 		h.problem(w, r, http.StatusConflict, "driver_busy", "Driver busy", "Driver already has an active trip")
 	case errors.Is(err, trip.ErrCompleted):
 		h.problem(w, r, http.StatusConflict, "trip_completed", "Trip completed", "The trip is already completed")
+	case errors.Is(err, trip.ErrIdempotencyConflict):
+		h.problem(w, r, http.StatusConflict, "idempotency_conflict", "Idempotency conflict", "Idempotency-Key was already used with a different request body")
 	default:
 		h.logger.Error("trip request failed", "method", r.Method, "error", err)
 		h.problem(w, r, http.StatusInternalServerError, "internal_error", "Internal error", "An internal error occurred")

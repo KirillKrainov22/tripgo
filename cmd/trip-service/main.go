@@ -86,7 +86,7 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	defer cancelRequests()
 	repository := postgres.NewRepository(pool, cfg.DatabaseQueryTimeout)
 	txManager := postgres.NewTxManager(pool, cfg.DatabaseQueryTimeout)
-	trips := trip.NewService(repository, txManager)
+	trips := trip.NewService(repository, txManager, cfg.IdempotencyTTL)
 	server := &http.Server{
 		Handler:           httpapi.NewHandler(trips, pool.Ping, cfg.DatabaseQueryTimeout, logger),
 		ReadTimeout:       cfg.HTTPReadTimeout,

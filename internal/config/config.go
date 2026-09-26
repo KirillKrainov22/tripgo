@@ -18,6 +18,7 @@ type Config struct {
 	HTTPReadHeaderTimeout time.Duration
 	HTTPWriteTimeout      time.Duration
 	HTTPIdleTimeout       time.Duration
+	IdempotencyTTL        time.Duration
 
 	DatabaseURL             string
 	DatabaseMaxConns        int32
@@ -66,6 +67,7 @@ func Load() (Config, error) {
 		{"HTTP_READ_HEADER_TIMEOUT", &cfg.HTTPReadHeaderTimeout},
 		{"HTTP_WRITE_TIMEOUT", &cfg.HTTPWriteTimeout},
 		{"HTTP_IDLE_TIMEOUT", &cfg.HTTPIdleTimeout},
+		{"IDEMPOTENCY_TTL", &cfg.IdempotencyTTL},
 		{"DATABASE_CONNECT_TIMEOUT", &cfg.DatabaseConnectTimeout},
 		{"DATABASE_QUERY_TIMEOUT", &cfg.DatabaseQueryTimeout},
 		{"DATABASE_MAX_CONN_LIFETIME", &cfg.DatabaseMaxConnLifetime},
