@@ -16,6 +16,22 @@ var (
 	ErrIdempotencyConflict = errors.New("idempotency key was used with different trip data")
 )
 
+type InvalidRequestError struct {
+	Reason string
+}
+
+func InvalidRequest(format string, args ...any) error {
+	return &InvalidRequestError{Reason: fmt.Sprintf(format, args...)}
+}
+
+func (e *InvalidRequestError) Error() string {
+	return ErrInvalidRequest.Error() + ": " + e.Reason
+}
+
+func (e *InvalidRequestError) Unwrap() error {
+	return ErrInvalidRequest
+}
+
 const (
 	Active    = "active"
 	Completed = "completed"
@@ -43,15 +59,24 @@ type Trip struct {
 }
 
 func (d Data) Validate() error {
-	if d.UserID == uuid.Nil || d.DriverID == uuid.Nil {
-		return fmt.Errorf("%w: user_id and driver_id must be nonzero UUIDs", ErrInvalidRequest)
+	if d.UserID == uuid.Nil {
+		return InvalidRequest("user_id must be a nonzero UUID")
+	}
+	if d.DriverID == uuid.Nil {
+		return InvalidRequest("driver_id must be a nonzero UUID")
 	}
 	if d.Price < 0 {
-		return fmt.Errorf("%w: price must be nonnegative", ErrInvalidRequest)
+		return InvalidRequest("price must be nonnegative")
 	}
-	for _, point := range []Coordinates{d.StartPoint, d.EndPoint} {
-		if !inRange(point.Latitude, -90, 90) || !inRange(point.Longitude, -180, 180) {
-			return fmt.Errorf("%w: coordinates are outside their valid ranges", ErrInvalidRequest)
+	for _, point := range []struct {
+		name  string
+		value Coordinates
+	}{{"start_point", d.StartPoint}, {"end_point", d.EndPoint}} {
+		if !inRange(point.value.Latitude, -90, 90) {
+			return InvalidRequest("%s.latitude must be between -90 and 90", point.name)
+		}
+		if !inRange(point.value.Longitude, -180, 180) {
+			return InvalidRequest("%s.longitude must be between -180 and 180", point.name)
 		}
 	}
 	return nil

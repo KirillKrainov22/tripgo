@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -85,7 +86,16 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	requestCtx, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRequests()
 	repository := postgres.NewRepository(pool, cfg.DatabaseQueryTimeout)
-	txManager := postgres.NewTxManager(pool, cfg.DatabaseQueryTimeout)
+	txManager := postgres.NewTxManager(pool, cfg.DatabaseTxTimeout)
+
+	cleanupCtx, stopCleanup := context.WithCancel(ctx)
+	defer stopCleanup()
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		cleanupIdempotencyKeys(cleanupCtx, repository, cfg.IdempotencyCleanupInterval, logger)
+	}()
+
 	trips := trip.NewService(repository, txManager, cfg.IdempotencyTTL)
 	server := &http.Server{
 		Handler:           httpapi.NewHandler(trips, pool.Ping, cfg.DatabaseQueryTimeout, logger),
@@ -112,10 +122,11 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 		logger.Info("shutdown requested")
 	case serveErr = <-serveErrors:
 	}
+	stopCleanup()
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), cfg.ShutdownTimeout)
 	defer cancelShutdown()
-	if err := shutdown(shutdownCtx, server, pool, cancelRequests); err != nil {
+	if err := shutdown(shutdownCtx, server, pool, cancelRequests, cleanupDone); err != nil {
 		return errors.Join(serveErr, err)
 	}
 	if serveErr != nil {
@@ -125,7 +136,28 @@ func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	return nil
 }
 
-func shutdown(ctx context.Context, server *http.Server, pool *pgxpool.Pool, cancelRequests context.CancelFunc) error {
+func cleanupIdempotencyKeys(ctx context.Context, repository *postgres.Repository, interval time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		deleted, err := repository.DeleteExpiredIdempotencyKeys(ctx)
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err != nil:
+			logger.Error("idempotency keys cleanup failed", "error", err)
+		case deleted > 0:
+			logger.Info("expired idempotency keys deleted", "count", deleted)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func shutdown(ctx context.Context, server *http.Server, pool *pgxpool.Pool, cancelRequests context.CancelFunc, cleanupDone <-chan struct{}) error {
 	serverErr := server.Shutdown(ctx)
 	if serverErr != nil {
 		cancelRequests()
@@ -134,6 +166,7 @@ func shutdown(ctx context.Context, server *http.Server, pool *pgxpool.Pool, canc
 
 	closed := make(chan struct{})
 	go func() {
+		<-cleanupDone
 		pool.Close()
 		close(closed)
 	}()

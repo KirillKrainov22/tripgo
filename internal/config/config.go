@@ -11,20 +11,22 @@ import (
 )
 
 type Config struct {
-	HTTPAddr              string
-	LogLevel              slog.Level
-	ShutdownTimeout       time.Duration
-	HTTPReadTimeout       time.Duration
-	HTTPReadHeaderTimeout time.Duration
-	HTTPWriteTimeout      time.Duration
-	HTTPIdleTimeout       time.Duration
-	IdempotencyTTL        time.Duration
+	HTTPAddr                   string
+	LogLevel                   slog.Level
+	ShutdownTimeout            time.Duration
+	HTTPReadTimeout            time.Duration
+	HTTPReadHeaderTimeout      time.Duration
+	HTTPWriteTimeout           time.Duration
+	HTTPIdleTimeout            time.Duration
+	IdempotencyTTL             time.Duration
+	IdempotencyCleanupInterval time.Duration
 
 	DatabaseURL             string
 	DatabaseMaxConns        int32
 	DatabaseMinConns        int32
 	DatabaseConnectTimeout  time.Duration
 	DatabaseQueryTimeout    time.Duration
+	DatabaseTxTimeout       time.Duration
 	DatabaseMaxConnLifetime time.Duration
 }
 
@@ -68,8 +70,10 @@ func Load() (Config, error) {
 		{"HTTP_WRITE_TIMEOUT", &cfg.HTTPWriteTimeout},
 		{"HTTP_IDLE_TIMEOUT", &cfg.HTTPIdleTimeout},
 		{"IDEMPOTENCY_TTL", &cfg.IdempotencyTTL},
+		{"IDEMPOTENCY_CLEANUP_INTERVAL", &cfg.IdempotencyCleanupInterval},
 		{"DATABASE_CONNECT_TIMEOUT", &cfg.DatabaseConnectTimeout},
 		{"DATABASE_QUERY_TIMEOUT", &cfg.DatabaseQueryTimeout},
+		{"DATABASE_TX_TIMEOUT", &cfg.DatabaseTxTimeout},
 		{"DATABASE_MAX_CONN_LIFETIME", &cfg.DatabaseMaxConnLifetime},
 	} {
 		value, err := required(setting.name)
@@ -84,6 +88,9 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("%s: must be greater than zero", setting.name)
 		}
 		*setting.dest = duration
+	}
+	if cfg.DatabaseTxTimeout < cfg.DatabaseQueryTimeout {
+		return Config{}, fmt.Errorf("DATABASE_TX_TIMEOUT: must not be less than DATABASE_QUERY_TIMEOUT")
 	}
 
 	cfg.DatabaseMaxConns, err = integer("DATABASE_MAX_CONNS")

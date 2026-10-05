@@ -55,3 +55,35 @@ func (r *Repository) ReserveCreation(ctx context.Context, key uuid.UUID, candida
 	}
 	return stored, false, nil
 }
+
+const expiredKeysBatchSize = 1000
+
+func (r *Repository) DeleteExpiredIdempotencyKeys(ctx context.Context) (int64, error) {
+	var total int64
+	for {
+		deleted, err := r.deleteExpiredKeysBatch(ctx)
+		total += deleted
+		if err != nil || deleted < expiredKeysBatchSize {
+			return total, err
+		}
+	}
+}
+
+func (r *Repository) deleteExpiredKeysBatch(ctx context.Context) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+
+	expired := sq.Select("key").From("trip_idempotency_keys").
+		Where("expires_at <= clock_timestamp()").OrderBy("expires_at").
+		Limit(expiredKeysBatchSize).Suffix("FOR UPDATE SKIP LOCKED")
+	query, args, err := sq.Delete("trip_idempotency_keys").
+		Where(sq.Expr("key IN (?)", expired)).PlaceholderFormat(sq.Dollar).ToSql()
+	if err != nil {
+		return 0, fmt.Errorf("build delete expired idempotency keys: %w", err)
+	}
+	tag, err := executorFor(ctx, r.pool).Exec(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired idempotency keys: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"slices"
 	"strings"
 
 	api "github.com/KirillKrainov22/tripgo/internal/generated"
@@ -46,7 +47,7 @@ func (h *handler) GetTrip(w http.ResponseWriter, r *http.Request, id api.TripId)
 func (h *handler) FinishTrip(w http.ResponseWriter, r *http.Request, id api.TripId) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil || len(bytes.TrimSpace(body)) != 0 {
-		h.handleError(w, r, trip.ErrInvalidRequest)
+		h.handleError(w, r, trip.InvalidRequest("request body must be empty"))
 		return
 	}
 	value, err := h.trips.Finish(r.Context(), id)
@@ -57,48 +58,77 @@ func (h *handler) FinishTrip(w http.ResponseWriter, r *http.Request, id api.Trip
 	h.writeJSON(w, http.StatusOK, toAPITrip(value))
 }
 
+type jsonField struct {
+	path     string
+	raw      json.RawMessage
+	expected string
+	dest     any
+}
+
 func decodeTripData(w http.ResponseWriter, r *http.Request) (trip.Data, error) {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || contentType != "application/json" {
-		return trip.Data{}, trip.ErrInvalidRequest
+		return trip.Data{}, trip.InvalidRequest("Content-Type must be application/json")
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
-		return trip.Data{}, trip.ErrInvalidRequest
+		return trip.Data{}, trip.InvalidRequest("request body cannot be read or exceeds 1 MiB")
 	}
-	fields, err := exactObject(body, "user_id", "driver_id", "start_point", "end_point", "price")
+	fields, err := exactObject(body, "", "user_id", "driver_id", "start_point", "end_point", "price")
 	if err != nil {
 		return trip.Data{}, err
 	}
-	for _, field := range []string{"start_point", "end_point"} {
-		if _, err := exactObject(fields[field], "latitude", "longitude"); err != nil {
+	var data trip.Data
+	values := []jsonField{
+		{"user_id", fields["user_id"], "a UUID", &data.UserID},
+		{"driver_id", fields["driver_id"], "a UUID", &data.DriverID},
+		{"price", fields["price"], "an integer", &data.Price},
+	}
+	for _, point := range []struct {
+		name string
+		dest *trip.Coordinates
+	}{{"start_point", &data.StartPoint}, {"end_point", &data.EndPoint}} {
+		coordinates, err := exactObject(fields[point.name], point.name, "latitude", "longitude")
+		if err != nil {
 			return trip.Data{}, err
 		}
+		values = append(values,
+			jsonField{point.name + ".latitude", coordinates["latitude"], "a number", &point.dest.Latitude},
+			jsonField{point.name + ".longitude", coordinates["longitude"], "a number", &point.dest.Longitude},
+		)
 	}
-	var input api.CreateTripJSONRequestBody
-	if err := json.Unmarshal(body, &input); err != nil {
-		return trip.Data{}, trip.ErrInvalidRequest
-	}
-	data := trip.Data{
-		UserID:     input.UserId,
-		DriverID:   input.DriverId,
-		Price:      input.Price,
-		StartPoint: trip.Coordinates{Latitude: input.StartPoint.Latitude, Longitude: input.StartPoint.Longitude},
-		EndPoint:   trip.Coordinates{Latitude: input.EndPoint.Latitude, Longitude: input.EndPoint.Longitude},
+	for _, value := range values {
+		if err := json.Unmarshal(value.raw, value.dest); err != nil {
+			return trip.Data{}, trip.InvalidRequest("%s must be %s", value.path, value.expected)
+		}
 	}
 	return data, data.Validate()
 }
 
-func exactObject(body []byte, required ...string) (map[string]json.RawMessage, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(body, &fields); err != nil || len(fields) != len(required) {
-		return nil, trip.ErrInvalidRequest
+func exactObject(body []byte, name string, required ...string) (map[string]json.RawMessage, error) {
+	object, prefix := "request body", ""
+	if name != "" {
+		object, prefix = name, name+"."
 	}
-	for _, name := range required {
-		value, exists := fields[name]
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		return nil, trip.InvalidRequest("%s must be a JSON object", object)
+	}
+	for _, field := range required {
+		value, exists := fields[field]
 		if !exists || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return nil, trip.ErrInvalidRequest
+			return nil, trip.InvalidRequest("%s%s is required", prefix, field)
 		}
+	}
+	var unknown []string
+	for field := range fields {
+		if !slices.Contains(required, field) {
+			unknown = append(unknown, prefix+field)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return nil, trip.InvalidRequest("unknown fields: %s", strings.Join(unknown, ", "))
 	}
 	return fields, nil
 }
@@ -120,7 +150,12 @@ func toAPITrip(value trip.Trip) api.Trip {
 func (h *handler) handleError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, trip.ErrInvalidRequest):
-		h.problem(w, r, http.StatusBadRequest, "invalid_request", "Invalid request", "The request does not match the API contract")
+		detail := "The request does not match the API contract"
+		var invalid *trip.InvalidRequestError
+		if errors.As(err, &invalid) {
+			detail = invalid.Reason
+		}
+		h.problem(w, r, http.StatusBadRequest, "invalid_request", "Invalid request", detail)
 	case errors.Is(err, trip.ErrNotFound):
 		h.problem(w, r, http.StatusNotFound, "trip_not_found", "Trip not found", "The requested trip does not exist")
 	case errors.Is(err, trip.ErrDriverBusy):
