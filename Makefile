@@ -1,4 +1,4 @@
-.PHONY: run build generate test migrate migrate-down migrate-status docker-build docker-run
+.PHONY: run build generate lint test test-integration migrate migrate-down migrate-status docker-build docker-run
 
 DOCKER_IMAGE ?= tripgo:lab1
 DOCKER_PORT ?= 8080
@@ -23,9 +23,19 @@ docker-run:
 
 generate:
 	go tool oapi-codegen -config oapi-codegen.yaml contracts/openapi/trip-service.openapi.yaml
+	go generate ./...
+
+lint:
+	golangci-lint run ./...
 
 test:
-	go test -race ./...
+	go test -race -count=1 -coverprofile=coverage.out -coverpkg=./internal/usecase/...,./internal/domain/... ./...
+	@echo "coverage of internal/usecase and internal/domain:"
+	@go tool cover -func=coverage.out | tail -1
+
+test-integration:
+	@test -f .env || { echo 'Run tripgoctl environment start first: .env is missing' >&2; exit 1; }
+	@set -a; . ./.env.example; . ./.env; set +a; go test -race -count=1 -tags integration ./internal/repository/...
 
 migrate:
 	@test -f .env || { echo 'Run tripgoctl environment start first: .env is missing' >&2; exit 1; }
