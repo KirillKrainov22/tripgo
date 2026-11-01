@@ -1,6 +1,7 @@
 package respond
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,13 @@ import (
 	"github.com/KirillKrainov22/tripgo/internal/http/domainerror"
 )
 
+type failureKey struct{}
+
+func WithFailure(ctx context.Context) (context.Context, *error) {
+	var failure error
+	return context.WithValue(ctx, failureKey{}, &failure), &failure
+}
+
 func JSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -22,13 +30,25 @@ func JSON(w http.ResponseWriter, status int, body any) {
 func Error(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err error) {
 	status, body := domainerror.Problem(err)
 	if status >= http.StatusInternalServerError {
-		logger.ErrorContext(r.Context(), "request failed", "error", err)
-		span := trace.SpanFromContext(r.Context())
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "internal error")
-		span.SetAttributes(attribute.String("error.type", body.Code))
+		if !RecordError(r, err) {
+			logger.ErrorContext(r.Context(), "request failed", "error", err)
+		}
 	}
 	Problem(w, r, status, body)
+}
+
+// RecordError annotates the span without writing a response. It reports whether
+// the request logger will include the error, so callers can avoid duplicate logs.
+func RecordError(r *http.Request, err error) bool {
+	failure, hasRequestLog := r.Context().Value(failureKey{}).(*error)
+	if hasRequestLog {
+		*failure = err
+	}
+	span := trace.SpanFromContext(r.Context())
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "internal error")
+	span.SetAttributes(attribute.String("error.type", "internal_error"))
+	return hasRequestLog
 }
 
 func Problem(w http.ResponseWriter, r *http.Request, status int, body api.Problem) {

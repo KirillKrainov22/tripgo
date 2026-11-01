@@ -34,10 +34,16 @@ func Metrics(meter metric.Meter, routes chi.Routes) (func(http.Handler) http.Han
 			route := attribute.String("http.route", routePattern(routes, r))
 			active.Add(r.Context(), 1, metric.WithAttributes(method, route))
 			rec := newRecorder(w)
+			returned := false
+			defer func() {
+				active.Add(r.Context(), -1, metric.WithAttributes(method, route))
+				if returned || rec.committed {
+					status := attribute.Int("http.response.status_code", rec.status)
+					duration.Record(r.Context(), time.Since(started).Seconds(), metric.WithAttributes(method, route, status))
+				}
+			}()
 			next.ServeHTTP(rec, r)
-			active.Add(r.Context(), -1, metric.WithAttributes(method, route))
-			status := attribute.Int("http.response.status_code", rec.status)
-			duration.Record(r.Context(), time.Since(started).Seconds(), metric.WithAttributes(method, route, status))
+			returned = true
 		})
 	}, nil
 }

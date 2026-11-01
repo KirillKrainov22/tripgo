@@ -8,7 +8,8 @@ import (
 
 type recorder struct {
 	http.ResponseWriter
-	status int
+	status    int
+	committed bool
 }
 
 func newRecorder(w http.ResponseWriter) *recorder {
@@ -16,8 +17,23 @@ func newRecorder(w http.ResponseWriter) *recorder {
 }
 
 func (r *recorder) WriteHeader(status int) {
+	if r.committed {
+		return
+	}
+	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+		r.ResponseWriter.WriteHeader(status)
+		return
+	}
 	r.status = status
+	r.committed = true
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *recorder) Write(body []byte) (int, error) {
+	if !r.committed {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(body)
 }
 
 func (r *recorder) Unwrap() http.ResponseWriter {

@@ -53,27 +53,31 @@ func (t *queryTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data 
 		collection: collectionName(data.SQL),
 	}
 	ctx = t.spans.TraceQueryStart(ctx, conn, data)
-	trace.SpanFromContext(ctx).SetAttributes(
-		attribute.String("db.operation.name", info.operation),
-		attribute.String("db.collection.name", info.collection),
-	)
+	trace.SpanFromContext(ctx).SetAttributes(info.attributes()...)
 	return context.WithValue(ctx, queryInfoKey{}, info)
 }
 
 func (t *queryTracer) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryEndData) {
+	var errorAttr []attribute.KeyValue
+	if data.Err != nil {
+		errorAttr = append(errorAttr, attribute.String("error.type", errorType(data.Err)))
+		trace.SpanFromContext(ctx).SetAttributes(errorAttr...)
+	}
 	t.spans.TraceQueryEnd(ctx, conn, data)
 	info, ok := ctx.Value(queryInfoKey{}).(queryInfo)
 	if !ok {
 		return
 	}
-	attrs := []attribute.KeyValue{
-		attribute.String("db.operation.name", info.operation),
-		attribute.String("db.collection.name", info.collection),
-	}
-	if data.Err != nil {
-		attrs = append(attrs, attribute.String("error.type", errorType(data.Err)))
-	}
+	attrs := append(info.attributes(), errorAttr...)
 	t.duration.Record(ctx, time.Since(info.started).Seconds(), metric.WithAttributes(attrs...))
+}
+
+func (q queryInfo) attributes() []attribute.KeyValue {
+	attrs := []attribute.KeyValue{attribute.String("db.operation.name", q.operation)}
+	if q.collection != "" {
+		attrs = append(attrs, attribute.String("db.collection.name", q.collection))
+	}
+	return attrs
 }
 
 func operationName(sql string) string {
@@ -92,7 +96,7 @@ func collectionName(sql string) string {
 			return strings.Trim(fields[i+1], "(),;")
 		}
 	}
-	return "unknown"
+	return ""
 }
 
 func errorType(err error) string {

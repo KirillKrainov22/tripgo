@@ -57,7 +57,9 @@ func New(cfg Config) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	handler := metrics(routes)
+	// Recover handler panics before unwinding telemetry, so it observes the 500.
+	// The outer Recover below remains a safety net for the middleware themselves.
+	handler := metrics(middleware.Recover(cfg.Logger)(routes))
 	handler = middleware.Logging(cfg.Logger, routes)(handler)
 	handler = middleware.Tracing(cfg.TracerProvider, routes)(handler)
 	handler = middleware.Recover(cfg.Logger)(handler)

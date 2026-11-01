@@ -61,8 +61,9 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 
 	app, err := build(ctx, cfg, logger, tel, pool)
 	if err != nil {
+		shutdownErr := tel.Shutdown(ctx)
 		pool.Close()
-		return nil, errors.Join(err, tel.Shutdown(ctx))
+		return nil, errors.Join(err, shutdownErr)
 	}
 	return app, nil
 }
@@ -159,6 +160,10 @@ func (a *App) Shutdown(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("stop background workers: %w", err))
 	}
 
+	if err := a.telemetry.Shutdown(ctx); err != nil {
+		a.logger.Warn("telemetry shutdown failed", "error", err)
+	}
+
 	poolClosed := make(chan struct{})
 	go func() {
 		a.pool.Close()
@@ -166,10 +171,6 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}()
 	if err := wait(ctx, poolClosed); err != nil {
 		errs = append(errs, fmt.Errorf("close database pool: %w", err))
-	}
-
-	if err := a.telemetry.Shutdown(ctx); err != nil {
-		a.logger.Warn("telemetry shutdown failed", "error", err)
 	}
 	return errors.Join(errs...)
 }
