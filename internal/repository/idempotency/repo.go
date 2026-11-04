@@ -1,4 +1,4 @@
-package postgres
+package idempotency
 
 import (
 	"context"
@@ -10,11 +10,24 @@ import (
 	sq "github.com/Masterminds/squirrel"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/KirillKrainov22/tripgo/internal/trip"
+	"github.com/KirillKrainov22/tripgo/internal/domain/trip"
+	"github.com/KirillKrainov22/tripgo/internal/infra/postgres/transaction"
 )
 
-func (r *Repository) ReserveCreation(ctx context.Context, key uuid.UUID, candidate trip.Trip, ttl time.Duration) (stored trip.Trip, claimed bool, err error) {
+const deleteBatchSize = 1000
+
+type Repository struct {
+	pool    *pgxpool.Pool
+	timeout time.Duration
+}
+
+func New(pool *pgxpool.Pool, timeout time.Duration) *Repository {
+	return &Repository{pool: pool, timeout: timeout}
+}
+
+func (r *Repository) Reserve(ctx context.Context, key uuid.UUID, candidate trip.Trip, ttl time.Duration) (stored trip.Trip, claimed bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
@@ -34,7 +47,7 @@ func (r *Repository) ReserveCreation(ctx context.Context, key uuid.UUID, candida
 		return trip.Trip{}, false, fmt.Errorf("build reserve creation: %w", err)
 	}
 	var reserved uuid.UUID
-	err = executorFor(ctx, r.pool).QueryRow(ctx, query, args...).Scan(&reserved)
+	err = transaction.ExecutorFrom(ctx, r.pool).QueryRow(ctx, query, args...).Scan(&reserved)
 	if err == nil {
 		return candidate, true, nil
 	}
@@ -47,7 +60,7 @@ func (r *Repository) ReserveCreation(ctx context.Context, key uuid.UUID, candida
 	if err != nil {
 		return trip.Trip{}, false, fmt.Errorf("build select creation response: %w", err)
 	}
-	if err := executorFor(ctx, r.pool).QueryRow(ctx, query, args...).Scan(&response); err != nil {
+	if err := transaction.ExecutorFrom(ctx, r.pool).QueryRow(ctx, query, args...).Scan(&response); err != nil {
 		return trip.Trip{}, false, fmt.Errorf("select creation response: %w", err)
 	}
 	if err := json.Unmarshal(response, &stored); err != nil {
@@ -56,32 +69,30 @@ func (r *Repository) ReserveCreation(ctx context.Context, key uuid.UUID, candida
 	return stored, false, nil
 }
 
-const expiredKeysBatchSize = 1000
-
-func (r *Repository) DeleteExpiredIdempotencyKeys(ctx context.Context) (int64, error) {
+func (r *Repository) DeleteExpired(ctx context.Context) (int64, error) {
 	var total int64
 	for {
-		deleted, err := r.deleteExpiredKeysBatch(ctx)
+		deleted, err := r.deleteExpiredBatch(ctx)
 		total += deleted
-		if err != nil || deleted < expiredKeysBatchSize {
+		if err != nil || deleted < deleteBatchSize {
 			return total, err
 		}
 	}
 }
 
-func (r *Repository) deleteExpiredKeysBatch(ctx context.Context) (int64, error) {
+func (r *Repository) deleteExpiredBatch(ctx context.Context) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 
 	expired := sq.Select("key").From("trip_idempotency_keys").
 		Where("expires_at <= clock_timestamp()").OrderBy("expires_at").
-		Limit(expiredKeysBatchSize).Suffix("FOR UPDATE SKIP LOCKED")
+		Limit(deleteBatchSize).Suffix("FOR UPDATE SKIP LOCKED")
 	query, args, err := sq.Delete("trip_idempotency_keys").
 		Where(sq.Expr("key IN (?)", expired)).PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
 		return 0, fmt.Errorf("build delete expired idempotency keys: %w", err)
 	}
-	tag, err := executorFor(ctx, r.pool).Exec(ctx, query, args...)
+	tag, err := transaction.ExecutorFrom(ctx, r.pool).Exec(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("delete expired idempotency keys: %w", err)
 	}
