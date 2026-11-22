@@ -6,7 +6,9 @@ HTTP-сервис на Go для создания, получения и зав�
 - [№1](https://github.com/course-go-autumn-2026/course/blob/main/homework/tasks/01-http-and-postgres/README.md):
   HTTP API, PostgreSQL, менеджер транзакций, идемпотентность и Docker-сборка;
 - [№2](https://github.com/course-go-autumn-2026/course/blob/main/homework/tasks/02-architecture-and-observability/README.md):
-  слои, тесты, линтер, логи, метрики и трейсы через OpenTelemetry.
+  слои, тесты, линтер, логи, метрики и трейсы через OpenTelemetry;
+- [№3](https://github.com/course-go-autumn-2026/course/blob/main/homework/tasks/03-positions-and-worker-pool/README.md):
+  координаты поездки и фоновый опрос устаревших поездок через очередь и пул воркеров.
 
 ## Требования
 
@@ -16,8 +18,8 @@ HTTP-сервис на Go для создания, получения и зав�
 - Утилита курса [tripgoctl](https://github.com/course-go-autumn-2026/course-infra).
 - [golangci-lint](https://golangci-lint.run/) v2 для `make lint`.
 
-PostgreSQL, коллектор телеметрии, Jaeger, Prometheus и Grafana поднимает
-`tripgoctl`. Версии `goose`, `oapi-codegen` и `mockgen` закреплены в `go.mod`,
+PostgreSQL, коллектор телеметрии, Jaeger, Prometheus, Grafana и заглушку Push
+Service поднимает `tripgoctl`. Версии `goose`, `oapi-codegen` и `mockgen` закреплены в `go.mod`,
 команды Makefile запускают их через `go tool`.
 
 ## Запуск
@@ -33,7 +35,7 @@ make run
 ```
 
 `tripgoctl environment start` поднимает компоненты из `environment.toml` и
-создаёт `.env` с адресами базы и коллектора. `make run` загружает сначала
+создаёт `.env` с адресами базы, коллектора и Push Service. `make run` загружает сначала
 `.env.example`, затем `.env`, поэтому адреса берутся из запущенного окружения.
 `tripgoctl connect` печатает ссылки на Jaeger, Grafana и Prometheus.
 
@@ -54,6 +56,8 @@ curl -i http://localhost:8080/ready
 | `POST /api/v1/trips` | Создать поездку |
 | `GET /api/v1/trips/{tripId}` | Получить поездку по ID |
 | `POST /api/v1/trips/{tripId}/finish` | Завершить поездку |
+| `POST /api/v1/trips/{tripId}/positions` | Сохранить координату поездки |
+| `GET /api/v1/trips/{tripId}/positions` | Получить маршрут поездки |
 | `GET /health` | Проверить работу HTTP-сервера |
 | `GET /ready` | Проверить доступность PostgreSQL |
 
@@ -71,6 +75,17 @@ curl -i -X POST http://localhost:8080/api/v1/trips \
 `200`, повторное — `409 trip_completed`. Вторая активная поездка у водителя —
 `409 driver_busy`, неверные данные — `400 invalid_request`, неизвестный ID —
 `404 trip_not_found`, внутренняя ошибка — `500 internal_error` без подробностей.
+
+```sh
+curl -i -X POST http://localhost:8080/api/v1/trips/$TRIP_ID/positions \
+  -H 'Content-Type: application/json' \
+  --data "{\"coordinates\":{\"latitude\":59.935,\"longitude\":30.335},\"recorded_at\":\"$(date -u +%FT%TZ)\"}"
+curl -i http://localhost:8080/api/v1/trips/$TRIP_ID/positions
+```
+
+Сохранение координаты отвечает `201`, в завершённую поездку — `409 trip_completed`,
+координаты вне диапазона или `recorded_at` дальше чем на минуту в будущем —
+`400 invalid_request`. Маршрут отсортирован по `recorded_at`, затем по `id`.
 
 ## Настройки
 
@@ -95,6 +110,12 @@ curl -i -X POST http://localhost:8080/api/v1/trips \
 | `DATABASE_MAX_CONN_LIFETIME` | `30m` | Время жизни соединения с БД |
 | `IDEMPOTENCY_TTL` | `24h` | Срок действия ключа повторного запроса |
 | `IDEMPOTENCY_CLEANUP_INTERVAL` | `1h` | Период удаления просроченных ключей |
+| `POSITION_CHECK_INTERVAL` | `30s` | Период тикера сканера и пауза между повторными пушами |
+| `POSITION_STALE_AFTER` | `60s` | Сколько поездка может молчать, прежде чем её опросят |
+| `POSITION_WORKERS` | `4` | Число воркеров |
+| `POSITION_QUEUE_SIZE` | `100` | Ёмкость очереди |
+| `PUSH_HTTP_URL` | Из `.env` | Адрес Push Service |
+| `PUSH_REQUEST_TIMEOUT` | `1s` | Таймаут одного запроса в Push Service |
 
 Телеметрия настраивается стандартными переменными OpenTelemetry, SDK читает их
 сам: `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
@@ -145,6 +166,8 @@ container собирает всё; main читает конфиг, запуск�
 | `internal/infra/postgres/transaction` | Менеджер транзакций |
 | `internal/infra/telemetry` | OpenTelemetry SDK, логгер, бизнес-метрики |
 | `internal/worker/idempotency` | Фоновая очистка просроченных ключей |
+| `internal/worker/positions` | Сканер, очередь и пул воркеров опроса поездок |
+| `internal/gateway/push` | HTTP-клиент Push Service |
 | `internal/container` | Создание и связывание всех зависимостей, порядок остановки |
 
 **Зависимости направлены внутрь.** Ручки знают про usecase, usecase — про домен,
@@ -202,6 +225,12 @@ Jaeger, Prometheus и Grafana. Провайдеры трейсов и метри
 | `tripgo.trips.created` | counter | — |
 | `tripgo.trips.completed` | counter | — |
 | `tripgo.trips.active` | gauge | — |
+| `tripgo.positions.saved` | counter | — |
+| `tripgo.stale_checks` | counter | `result` = `queued`, `duplicate`, `dropped` |
+| `tripgo.position_requests` | counter | `result` = `success`, `error`, `dropped` |
+| `tripgo.position_requests.duration` | histogram, секунды | `result` |
+| `tripgo.position_requests.queue.size` | gauge | — |
+| `tripgo.position_requests.workers.active` | gauge | — |
 
 В `http.route` всегда шаблон маршрута (`/api/v1/trips/{tripId}`): если класть
 туда настоящий ID, на каждую поездку появится своя временная серия, и метрика
@@ -219,6 +248,63 @@ Jaeger, Prometheus и Grafana. Провайдеры трейсов и метри
 найти трейс `POST /api/v1/trips` со спанами `INSERT`; в Grafana найти
 `http_server_request_duration_seconds` и `tripgo_trips_created_total`;
 `trace_id` из лога ищется в Jaeger.
+
+## Опрос устаревших поездок
+
+```text
+тикер ──► сканер ──► очередь (канал на POSITION_QUEUE_SIZE) ──► POSITION_WORKERS воркеров ──► Push Service
+            │                 ▲                                         │
+            └── SQL: активные поездки без свежих координат              └── «сейчас в очереди»: дедупликация и отмена
+```
+
+**Сканер** — одна горутина с тикером на `POSITION_CHECK_INTERVAL`. На каждом тике
+один запрос в бд отдаёт активные поездки, у которых `COALESCE(last_position_at,
+started_at)` старше `POSITION_STALE_AFTER`; условие по времени считается в SQL,
+первыми идут те, кто молчит дольше всех. Под запрос есть частичный индекс
+`trips_active_last_seen_idx` по этому выражению, `EXPLAIN (ANALYZE)` показывает
+`Index Scan` без отдельной сортировки. Тики не накладываются: обход выполняется в
+той же горутине, что читает тикер.
+
+**Очередь** — буферизованный канал. Сканер ставит задачу неблокирующей записью:
+если очередь заполнена, задача дропается, растут `tripgo.stale_checks{result="dropped"}`
+и `tripgo.position_requests{result="dropped"}`, пишется лог `Warn`. Сканер никогда не
+ждёт воркеров, поэтому медленный Push Service не останавливает проверку остальных
+поездок, а память не растёт. Дропнутая поездка попадёт в выборку на следующем тике.
+
+**Дедупликация и отмена.** Структура «сейчас в очереди» — карта поездок под
+мьютексом, у каждой постановки свой номер. Сканер ставит поездку, только если её
+там нет, иначе `duplicate`; воркер убирает поездку после обработки. Пришедшая
+координата удаляет поездку из карты: задача, которая уже лежит в канале, при
+обработке отбрасывается, потому что её номера в карте больше нет.
+
+**Воркеры** — `POSITION_WORKERS` горутин, запускаются при старте и живут до
+остановки, горутину на задачу не создаём. Каждая задача обрабатывается с
+таймаутом `PUSH_REQUEST_TIMEOUT`; ошибка Push Service пишется в лог `Warn` и в
+метрику, воркер берёт следующую задачу. Спан обработки связан со спаном проверки
+через span link, вызов Push Service — дочерний спан.
+
+**Сохранение координаты** в одной транзакции обновляет
+`last_position_at = GREATEST(last_position_at, recorded_at)` только у активной
+поездки и вставляет точку в `trip_positions`. Сравнение делает сам `UPDATE`, поэтому
+опоздавшая старая координата не «состарит» поездку.
+
+**Остановка** идёт по порядку: HTTP-сервер дожидается текущих запросов, сканер
+останавливается, воркеры дорабатывают то, что уже в очереди, в пределах
+`SHUTDOWN_TIMEOUT`, затем закрываются HTTP-клиент, телеметрия и пул бд. Если сначала
+остановить воркеров, сканер продолжал бы класть задачи в очередь, которую никто не
+читает; если сначала закрыть пул бд, сканер и ручки получали бы ошибки посреди работы.
+
+**Сознательные упрощения:** выборка идёт без `LIMIT` и тянет все подходящие поездки
+сразу, а время отправленной команды не хранится, поэтому период тикера и есть пауза
+между повторными пушами. В проде читали бы батчами по ключу и развели бы эти два
+интервала.
+
+Проверка: создать поездку и не слать координаты — через `POSITION_STALE_AFTER` в
+`tripgoctl environment logs push-service` появится `REQUEST_POSITION`, не чаще раза
+за `POSITION_CHECK_INTERVAL`; если слать координаты каждые 5 секунд, команд нет.
+Задержку заглушки можно включить через админку из `tripgoctl connect`
+(`/admin/behaviour`, `{"latency_ms":5000}`) — ручки отвечают быстро, вызовы
+обрываются по `PUSH_REQUEST_TIMEOUT`, сканер продолжает тикать.
 
 ## Решения
 
@@ -281,7 +367,8 @@ internal/usecase/     бизнес-действия
 internal/http/        транспорт: ручки, маппинг ошибок, middleware, роутер
 internal/repository/  SQL-запросы
 internal/infra/       пул бд, транзакции, телеметрия
-internal/worker/      фоновые компоненты
+internal/worker/      фоновые компоненты: очистка ключей и опрос поездок
+internal/gateway/     клиенты внешних сервисов
 internal/generated/   код, сгенерированный из OpenAPI
 migrations/           SQL-миграции
 contracts/            исходные контракты курса

@@ -12,6 +12,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/KirillKrainov22/tripgo/internal/config"
+	"github.com/KirillKrainov22/tripgo/internal/gateway/push"
+	positionlisthttp "github.com/KirillKrainov22/tripgo/internal/http/position/list"
+	positionsavehttp "github.com/KirillKrainov22/tripgo/internal/http/position/save"
 	"github.com/KirillKrainov22/tripgo/internal/http/router"
 	tripcreatehttp "github.com/KirillKrainov22/tripgo/internal/http/trip/create"
 	tripfinishhttp "github.com/KirillKrainov22/tripgo/internal/http/trip/finish"
@@ -20,11 +23,15 @@ import (
 	"github.com/KirillKrainov22/tripgo/internal/infra/postgres/transaction"
 	"github.com/KirillKrainov22/tripgo/internal/infra/telemetry"
 	idempotencyrepo "github.com/KirillKrainov22/tripgo/internal/repository/idempotency"
+	positionrepo "github.com/KirillKrainov22/tripgo/internal/repository/position"
 	triprepo "github.com/KirillKrainov22/tripgo/internal/repository/trip"
+	positionlist "github.com/KirillKrainov22/tripgo/internal/usecase/position/list"
+	positionsave "github.com/KirillKrainov22/tripgo/internal/usecase/position/save"
 	"github.com/KirillKrainov22/tripgo/internal/usecase/trip/create"
 	"github.com/KirillKrainov22/tripgo/internal/usecase/trip/finish"
 	"github.com/KirillKrainov22/tripgo/internal/usecase/trip/get"
 	idempotencyworker "github.com/KirillKrainov22/tripgo/internal/worker/idempotency"
+	"github.com/KirillKrainov22/tripgo/internal/worker/positions"
 )
 
 type App struct {
@@ -35,6 +42,8 @@ type App struct {
 	server         *http.Server
 	cancelRequests context.CancelFunc
 	cleaner        *idempotencyworker.Cleaner
+	poller         *positions.Pool
+	push           *push.Client
 	backgroundCtx  context.Context
 	stopBackground context.CancelFunc
 	backgroundDone chan struct{}
@@ -72,7 +81,9 @@ func build(ctx context.Context, cfg config.Config, logger *slog.Logger, tel *tel
 	meter := tel.Meter()
 	trips := triprepo.New(pool, cfg.DatabaseQueryTimeout)
 	keys := idempotencyrepo.New(pool, cfg.DatabaseQueryTimeout)
+	positionStore := positionrepo.New(pool, cfg.DatabaseQueryTimeout)
 	txManager := transaction.NewManager(pool, cfg.DatabaseTxTimeout)
+	pushClient := push.New(cfg.PushHTTPURL, cfg.PushRequestTimeout, tel.TracerProvider)
 
 	tripMetrics, err := telemetry.NewTripMetrics(meter)
 	if err != nil {
@@ -81,11 +92,23 @@ func build(ctx context.Context, cfg config.Config, logger *slog.Logger, tel *tel
 	if err := telemetry.RegisterActiveTrips(meter, trips.CountActive); err != nil {
 		return nil, err
 	}
+	poller, err := positions.New(positions.Config{
+		CheckInterval:  cfg.PositionCheckInterval,
+		StaleAfter:     cfg.PositionStaleAfter,
+		Workers:        cfg.PositionWorkers,
+		QueueSize:      cfg.PositionQueueSize,
+		RequestTimeout: cfg.PushRequestTimeout,
+	}, trips, pushClient, positions.NewTicker, meter, tel.TracerProvider, logger)
+	if err != nil {
+		return nil, err
+	}
 
 	handler, err := router.New(router.Config{
 		CreateTrip:     tripcreatehttp.New(create.New(trips, keys, txManager, tripMetrics, logger, cfg.IdempotencyTTL), logger),
 		GetTrip:        tripgethttp.New(get.New(trips), logger),
 		FinishTrip:     tripfinishhttp.New(finish.New(trips, txManager, tripMetrics, logger), logger),
+		SavePosition:   positionsavehttp.New(positionsave.New(trips, positionStore, txManager, poller, tripMetrics), logger),
+		ListPositions:  positionlisthttp.New(positionlist.New(trips, positionStore), logger),
 		Ping:           pool.Ping,
 		ReadyTimeout:   cfg.DatabaseQueryTimeout,
 		Logger:         logger,
@@ -120,6 +143,8 @@ func build(ctx context.Context, cfg config.Config, logger *slog.Logger, tel *tel
 		server:         server,
 		cancelRequests: cancelRequests,
 		cleaner:        idempotencyworker.NewCleaner(keys, cfg.IdempotencyCleanupInterval, logger),
+		poller:         poller,
+		push:           pushClient,
 		backgroundCtx:  backgroundCtx,
 		stopBackground: stopBackground,
 		backgroundDone: make(chan struct{}),
@@ -135,6 +160,7 @@ func (a *App) Start() <-chan error {
 		defer close(a.backgroundDone)
 		a.cleaner.Run(a.backgroundCtx)
 	}()
+	a.poller.Start(context.WithoutCancel(a.backgroundCtx))
 	serveErrors := make(chan error, 1)
 	go func() {
 		err := a.server.Serve(a.listener)
@@ -156,9 +182,14 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}
 
 	a.stopBackground()
+	a.poller.StopScanner()
 	if err := wait(ctx, a.backgroundDone); err != nil {
 		errs = append(errs, fmt.Errorf("stop background workers: %w", err))
 	}
+	if err := a.poller.StopWorkers(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	a.push.Close()
 
 	if err := a.telemetry.Shutdown(ctx); err != nil {
 		a.logger.Warn("telemetry shutdown failed", "error", err)

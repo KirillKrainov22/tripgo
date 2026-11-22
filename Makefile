@@ -19,10 +19,11 @@ docker-run:
 	@set -a; . ./.env.example; . ./.env; set +a; \
 	container_url() { printf '%s' "$$1" | sed -E 's@^(https?://)(localhost|127\.0\.0\.1|\[::1\])([:/]|$$)@\1host.docker.internal\3@'; }; \
 	DATABASE_URL=$$(printf '%s' "$$DATABASE_URL" | sed 's/@localhost:/@host.docker.internal:/; s/@127\.0\.0\.1:/@host.docker.internal:/'); \
+	PUSH_HTTP_URL=$$(container_url "$$PUSH_HTTP_URL"); \
 	OTEL_EXPORTER_OTLP_ENDPOINT=$$(container_url "$$OTEL_EXPORTER_OTLP_ENDPOINT"); \
 	docker run --rm --read-only -p 127.0.0.1:$(DOCKER_PORT):8080 \
 		--env-file .env.example --env-file .env \
-		-e HTTP_ADDR=:8080 -e DATABASE_URL -e OTEL_EXPORTER_OTLP_ENDPOINT $(DOCKER_IMAGE)
+		-e HTTP_ADDR=:8080 -e DATABASE_URL -e PUSH_HTTP_URL -e OTEL_EXPORTER_OTLP_ENDPOINT $(DOCKER_IMAGE)
 
 generate:
 	go tool oapi-codegen -config oapi-codegen.yaml contracts/openapi/trip-service.openapi.yaml

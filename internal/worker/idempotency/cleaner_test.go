@@ -7,10 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
 	"go.uber.org/mock/gomock"
 
 	"github.com/KirillKrainov22/tripgo/internal/worker/idempotency"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 func TestCleanerStopsWhenContextCanceled(t *testing.T) {
 	keys := NewMockkeyRemover(gomock.NewController(t))

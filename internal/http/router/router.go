@@ -15,6 +15,8 @@ import (
 	api "github.com/KirillKrainov22/tripgo/internal/generated"
 	"github.com/KirillKrainov22/tripgo/internal/http/domainerror"
 	"github.com/KirillKrainov22/tripgo/internal/http/middleware"
+	positionlist "github.com/KirillKrainov22/tripgo/internal/http/position/list"
+	positionsave "github.com/KirillKrainov22/tripgo/internal/http/position/save"
 	"github.com/KirillKrainov22/tripgo/internal/http/respond"
 	tripcreate "github.com/KirillKrainov22/tripgo/internal/http/trip/create"
 	tripfinish "github.com/KirillKrainov22/tripgo/internal/http/trip/finish"
@@ -25,6 +27,8 @@ type Config struct {
 	CreateTrip     *tripcreate.Handler
 	GetTrip        *tripget.Handler
 	FinishTrip     *tripfinish.Handler
+	SavePosition   *positionsave.Handler
+	ListPositions  *positionlist.Handler
 	Ping           func(ctx context.Context) error
 	ReadyTimeout   time.Duration
 	Logger         *slog.Logger
@@ -88,6 +92,14 @@ func (s *server) GetTrip(w http.ResponseWriter, r *http.Request, id api.TripId) 
 
 func (s *server) FinishTrip(w http.ResponseWriter, r *http.Request, id api.TripId) {
 	s.cfg.FinishTrip.Handle(w, r, id)
+}
+
+func (s *server) CreateTripPosition(w http.ResponseWriter, r *http.Request, id api.TripId) {
+	s.cfg.SavePosition.Handle(w, r, id)
+}
+
+func (s *server) ListTripPositions(w http.ResponseWriter, r *http.Request, id api.TripId) {
+	s.cfg.ListPositions.Handle(w, r, id)
 }
 
 func (s *server) Health(w http.ResponseWriter, _ *http.Request) {
