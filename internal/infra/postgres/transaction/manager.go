@@ -1,4 +1,4 @@
-package postgres
+package transaction
 
 import (
 	"context"
@@ -19,16 +19,16 @@ type transactionContext struct {
 	failure error
 }
 
-type TxManager struct {
+type Manager struct {
 	pool    *pgxpool.Pool
 	timeout time.Duration
 }
 
-func NewTxManager(pool *pgxpool.Pool, timeout time.Duration) *TxManager {
-	return &TxManager{pool: pool, timeout: timeout}
+func NewManager(pool *pgxpool.Pool, timeout time.Duration) *Manager {
+	return &Manager{pool: pool, timeout: timeout}
 }
 
-func (m *TxManager) Do(ctx context.Context, fn func(context.Context) error) (err error) {
+func (m *Manager) Do(ctx context.Context, fn func(context.Context) error) (err error) {
 	if current, ok := ctx.Value(transactionKey{}).(*transactionContext); ok && current.pool == m.pool {
 		defer func() {
 			if value := recover(); value != nil {
@@ -68,12 +68,13 @@ func (m *TxManager) Do(ctx context.Context, fn func(context.Context) error) (err
 	return nil
 }
 
-type executor interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
+type Executor interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func executorFor(ctx context.Context, pool *pgxpool.Pool) executor {
+func ExecutorFrom(ctx context.Context, pool *pgxpool.Pool) Executor {
 	if current, ok := ctx.Value(transactionKey{}).(*transactionContext); ok && current.pool == pool {
 		return current.tx
 	}

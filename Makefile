@@ -1,7 +1,8 @@
-.PHONY: run build generate test migrate migrate-down migrate-status docker-build docker-run
+.PHONY: run build generate lint test test-integration mutation migrate migrate-down migrate-status docker-build docker-run
 
 DOCKER_IMAGE ?= tripgo:lab1
 DOCKER_PORT ?= 8080
+GREMLINS ?= github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 
 run:
 	@test -f .env || { echo 'Run tripgoctl environment start first: .env is missing' >&2; exit 1; }
@@ -16,16 +17,34 @@ docker-build:
 docker-run:
 	@test -f .env || { echo 'Run tripgoctl environment start first: .env is missing' >&2; exit 1; }
 	@set -a; . ./.env.example; . ./.env; set +a; \
+	container_url() { printf '%s' "$$1" | sed -E 's@^(https?://)(localhost|127\.0\.0\.1|\[::1\])([:/]|$$)@\1host.docker.internal\3@'; }; \
 	DATABASE_URL=$$(printf '%s' "$$DATABASE_URL" | sed 's/@localhost:/@host.docker.internal:/; s/@127\.0\.0\.1:/@host.docker.internal:/'); \
+	OTEL_EXPORTER_OTLP_ENDPOINT=$$(container_url "$$OTEL_EXPORTER_OTLP_ENDPOINT"); \
 	docker run --rm --read-only -p 127.0.0.1:$(DOCKER_PORT):8080 \
 		--env-file .env.example --env-file .env \
-		-e HTTP_ADDR=:8080 -e DATABASE_URL $(DOCKER_IMAGE)
+		-e HTTP_ADDR=:8080 -e DATABASE_URL -e OTEL_EXPORTER_OTLP_ENDPOINT $(DOCKER_IMAGE)
 
 generate:
 	go tool oapi-codegen -config oapi-codegen.yaml contracts/openapi/trip-service.openapi.yaml
+	go generate ./...
+
+lint:
+	golangci-lint run ./...
 
 test:
-	go test -race ./...
+	go test -race -count=1 -coverprofile=coverage.out -coverpkg=./internal/usecase/...,./internal/domain/... ./...
+	@echo "coverage of internal/usecase and internal/domain:"
+	@go tool cover -func=coverage.out | tail -1
+
+mutation:
+	go clean -testcache
+	go run $(GREMLINS) unleash --invert-logical --timeout-coefficient 10 ./internal/domain
+	go clean -testcache
+	go run $(GREMLINS) unleash --invert-logical --timeout-coefficient 10 ./internal/usecase
+
+test-integration:
+	@test -f .env || { echo 'Run tripgoctl environment start first: .env is missing' >&2; exit 1; }
+	@set -a; . ./.env.example; . ./.env; set +a; go test -race -count=1 -tags integration ./internal/repository/...
 
 migrate:
 	@test -f .env || { echo 'Run tripgoctl environment start first: .env is missing' >&2; exit 1; }
