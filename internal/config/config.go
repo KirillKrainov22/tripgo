@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +29,14 @@ type Config struct {
 	DatabaseQueryTimeout    time.Duration
 	DatabaseTxTimeout       time.Duration
 	DatabaseMaxConnLifetime time.Duration
+
+	PositionCheckInterval time.Duration
+	PositionStaleAfter    time.Duration
+	PositionWorkers       int
+	PositionQueueSize     int
+	PositionScanBatchSize int
+	PushHTTPURL           string
+	PushRequestTimeout    time.Duration
 }
 
 func Load() (Config, error) {
@@ -75,6 +84,9 @@ func Load() (Config, error) {
 		{"DATABASE_QUERY_TIMEOUT", &cfg.DatabaseQueryTimeout},
 		{"DATABASE_TX_TIMEOUT", &cfg.DatabaseTxTimeout},
 		{"DATABASE_MAX_CONN_LIFETIME", &cfg.DatabaseMaxConnLifetime},
+		{"POSITION_CHECK_INTERVAL", &cfg.PositionCheckInterval},
+		{"POSITION_STALE_AFTER", &cfg.PositionStaleAfter},
+		{"PUSH_REQUEST_TIMEOUT", &cfg.PushRequestTimeout},
 	} {
 		value, err := required(setting.name)
 		if err != nil {
@@ -106,6 +118,40 @@ func Load() (Config, error) {
 	}
 	if cfg.DatabaseMinConns < 0 || cfg.DatabaseMinConns > cfg.DatabaseMaxConns {
 		return Config{}, fmt.Errorf("DATABASE_MIN_CONNS: must be between zero and DATABASE_MAX_CONNS")
+	}
+
+	workers, err := integer("POSITION_WORKERS")
+	if err != nil {
+		return Config{}, err
+	}
+	if workers <= 0 {
+		return Config{}, fmt.Errorf("POSITION_WORKERS: must be greater than zero")
+	}
+	cfg.PositionWorkers = int(workers)
+	queueSize, err := integer("POSITION_QUEUE_SIZE")
+	if err != nil {
+		return Config{}, err
+	}
+	if queueSize <= 0 {
+		return Config{}, fmt.Errorf("POSITION_QUEUE_SIZE: must be greater than zero")
+	}
+	cfg.PositionQueueSize = int(queueSize)
+	batchSize, err := integer("POSITION_SCAN_BATCH_SIZE")
+	if err != nil {
+		return Config{}, err
+	}
+	if batchSize <= 0 {
+		return Config{}, fmt.Errorf("POSITION_SCAN_BATCH_SIZE: must be greater than zero")
+	}
+	cfg.PositionScanBatchSize = int(batchSize)
+
+	cfg.PushHTTPURL, err = required("PUSH_HTTP_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	pushURL, err := url.Parse(cfg.PushHTTPURL)
+	if err != nil || (pushURL.Scheme != "http" && pushURL.Scheme != "https") || pushURL.Host == "" {
+		return Config{}, fmt.Errorf("PUSH_HTTP_URL: expected an http or https URL")
 	}
 	return cfg, nil
 }
