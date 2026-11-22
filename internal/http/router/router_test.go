@@ -134,6 +134,24 @@ func TestUnknownRouteAndBadParameter(t *testing.T) {
 	}
 }
 
+func TestTelemetryUsesRouteTemplateForEncodedPath(t *testing.T) {
+	server := newServer(t, okPing)
+	recorder := server.do(http.MethodGet, "/api/v1/trips/a%2Fb")
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for invalid UUID", recorder.Code)
+	}
+
+	spans := server.spans.Ended()
+	if len(spans) != 1 || spans[0].Name() != "GET /api/v1/trips/{tripId}" {
+		t.Fatalf("unexpected spans: %v", spans)
+	}
+	attrs := attribute.NewSet(spans[0].Attributes()...)
+	route, _ := attrs.Value("http.route")
+	if route.AsString() != "/api/v1/trips/{tripId}" {
+		t.Errorf("http.route = %q", route.AsString())
+	}
+}
+
 func TestRecoverReturnsInternalError(t *testing.T) {
 	server := newServer(t, okPing)
 

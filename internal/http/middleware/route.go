@@ -41,7 +41,11 @@ func (r *recorder) Unwrap() http.ResponseWriter {
 }
 
 func routePattern(routes chi.Routes, r *http.Request) string {
-	pattern := routes.Find(chi.NewRouteContext(), r.Method, r.URL.Path)
+	path := r.URL.RawPath
+	if path == "" {
+		path = r.URL.Path
+	}
+	pattern := routes.Find(chi.NewRouteContext(), r.Method, path)
 	if pattern == "" {
 		return "unknown"
 	}
