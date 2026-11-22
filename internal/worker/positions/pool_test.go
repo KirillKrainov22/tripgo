@@ -206,6 +206,9 @@ func TestPositionCancelsQueuedRequest(t *testing.T) {
 	if got := h.count(t, "tripgo.position_requests", "success"); got != 1 {
 		t.Fatalf("success = %d, want only the busy trip", got)
 	}
+	if got := h.count(t, "tripgo.position_requests", "cancelled"); got != 1 {
+		t.Fatalf("cancelled requests = %d, want 1", got)
+	}
 }
 
 func TestPositionCancelsTripReadByConcurrentScan(t *testing.T) {
@@ -563,7 +566,7 @@ func TestScannerReadsAllBatches(t *testing.T) {
 	if got := h.count(t, "tripgo.stale_checks", "queued"); got != int64(len(trips)) {
 		t.Fatalf("queued = %d, want %d", got, len(trips))
 	}
-	if got := h.histogramSum(t, "tripgo.stale_scan.rows"); got != int64(len(trips)) {
+	if got := h.histogramSum(t, "tripgo.stale_checks.rows_read"); got != int64(len(trips)) {
 		t.Fatalf("rows read = %d, want %d", got, len(trips))
 	}
 }
@@ -674,8 +677,42 @@ func TestOlderTripEvictsFresherOneWhenQueueIsFull(t *testing.T) {
 	if got := h.count(t, "tripgo.position_requests", "dropped"); got != 2 {
 		t.Fatalf("dropped requests = %d, want 2: evicted fresher trip and rejected newest trip", got)
 	}
-	if got := h.count(t, "tripgo.stale_checks", "dropped"); got != 1 {
-		t.Fatalf("dropped checks = %d, want 1 for the newest trip", got)
+	if got := h.count(t, "tripgo.stale_checks", "dropped"); got != 2 {
+		t.Fatalf("dropped checks = %d, want 2: evicted fresher trip and rejected newest trip", got)
+	}
+}
+
+func TestReplacingCancelledTaskCountsItOnce(t *testing.T) {
+	h := newHarness(t, 1, 1)
+	h.pool.Start(context.Background())
+	release := h.blockFirstWorker(t)
+	cancelled, replacement := staleTrip(), staleTrip()
+	gomock.InOrder(
+		h.finder.EXPECT().FindStale(gomock.Any(), time.Minute, gomock.Nil(), batchSize).
+			Return([]model.StaleTrip{cancelled}, nil),
+		h.finder.EXPECT().FindStale(gomock.Any(), time.Minute, gomock.Nil(), batchSize).
+			DoAndReturn(func(context.Context, time.Duration, *model.StaleTrip, int) ([]model.StaleTrip, error) {
+				h.pool.Cancel(cancelled.TripID)
+				return []model.StaleTrip{replacement}, nil
+			}),
+	)
+	h.push.EXPECT().RequestPosition(gomock.Any(), replacement.TripID, replacement.DriverID).Return(nil)
+
+	h.tick()
+	h.tick()
+	h.pool.StopScanner()
+	release()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.pool.StopWorkers(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := h.count(t, "tripgo.position_requests", "cancelled"); got != 1 {
+		t.Fatalf("cancelled requests = %d, want 1", got)
+	}
+	if got := h.count(t, "tripgo.stale_checks", "dropped"); got != 0 {
+		t.Fatalf("dropped checks = %d, want 0 for replacement of a cancelled task", got)
 	}
 }
 

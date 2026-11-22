@@ -40,7 +40,7 @@ func newMetrics(meter metric.Meter, queueSize, activeWorkers func() int64) (*met
 	if err != nil {
 		return nil, err
 	}
-	scanRows, err := meter.Int64Histogram("tripgo.stale_scan.rows",
+	scanRows, err := meter.Int64Histogram("tripgo.stale_checks.rows_read",
 		metric.WithUnit("{row}"), metric.WithDescription("Stale trips read by the scanner in one tick"),
 		metric.WithExplicitBucketBoundaries(0, 10, 50, 100, 500, 1000, 5000, 10000))
 	if err != nil {

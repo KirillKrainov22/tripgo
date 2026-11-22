@@ -33,6 +33,11 @@ type task struct {
 	link  trace.SpanContext
 }
 
+type displacedTask struct {
+	tripID uuid.UUID
+	result string
+}
+
 const resultInvalidated = "invalidated"
 
 type Pool struct {
@@ -209,15 +214,18 @@ func (p *Pool) scan(ctx context.Context) {
 
 func (p *Pool) enqueueBatch(ctx context.Context, batch []model.StaleTrip, link trace.SpanContext) bool {
 	for _, item := range batch {
-		result, evicted := p.enqueue(item, link)
+		result, displaced := p.enqueue(item, link)
 		if result == resultInvalidated {
 			p.logger.WarnContext(ctx, "position scan invalidated: cancellation limit reached")
 			return false
 		}
 		p.metrics.staleChecks.Add(ctx, 1, resultAttr(result))
-		if evicted != nil {
-			p.metrics.requests.Add(ctx, 1, resultAttr(resultDropped))
-			p.logger.WarnContext(ctx, "position request evicted by a trip silent for longer", "trip_id", evicted.TripID.String())
+		if displaced != nil {
+			p.metrics.requests.Add(ctx, 1, resultAttr(displaced.result))
+			if displaced.result == resultDropped {
+				p.metrics.staleChecks.Add(ctx, 1, resultAttr(resultDropped))
+				p.logger.WarnContext(ctx, "position request evicted by a trip silent for longer", "trip_id", displaced.tripID.String())
+			}
 		}
 		if result == resultDropped {
 			p.metrics.requests.Add(ctx, 1, resultAttr(resultDropped))
@@ -228,7 +236,7 @@ func (p *Pool) enqueueBatch(ctx context.Context, batch []model.StaleTrip, link t
 	return true
 }
 
-func (p *Pool) enqueue(item model.StaleTrip, link trace.SpanContext) (string, *model.StaleTrip) {
+func (p *Pool) enqueue(item model.StaleTrip, link trace.SpanContext) (string, *displacedTask) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.scanInvalidated {
@@ -256,11 +264,12 @@ func (p *Pool) enqueue(item model.StaleTrip, link trace.SpanContext) (string, *m
 	heap.Remove(&p.tasks, victim)
 	heap.Push(&p.tasks, next)
 	p.pending[item.TripID] = next.token
+	displaced := &displacedTask{tripID: evicted.trip.TripID, result: resultCancelled}
 	if p.isPendingLocked(evicted) {
 		delete(p.pending, evicted.trip.TripID)
-		return resultQueued, &evicted.trip
+		displaced.result = resultDropped
 	}
-	return resultQueued, nil
+	return resultQueued, displaced
 }
 
 func (p *Pool) victimIndex() int {
@@ -288,6 +297,8 @@ func (p *Pool) work(ctx context.Context) {
 			if current, pending := p.next(); pending {
 				p.process(ctx, current)
 				p.forget(current)
+			} else {
+				p.metrics.requests.Add(ctx, 1, resultAttr(resultCancelled))
 			}
 		}
 	}
