@@ -97,6 +97,7 @@ func build(ctx context.Context, cfg config.Config, logger *slog.Logger, tel *tel
 		StaleAfter:     cfg.PositionStaleAfter,
 		Workers:        cfg.PositionWorkers,
 		QueueSize:      cfg.PositionQueueSize,
+		BatchSize:      cfg.PositionScanBatchSize,
 		RequestTimeout: cfg.PushRequestTimeout,
 	}, trips, pushClient, positions.NewTicker, meter, tel.TracerProvider, logger)
 	if err != nil {

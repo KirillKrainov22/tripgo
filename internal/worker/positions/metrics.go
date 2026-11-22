@@ -11,6 +11,7 @@ const (
 	resultQueued    = "queued"
 	resultDuplicate = "duplicate"
 	resultDropped   = "dropped"
+	resultCancelled = "cancelled"
 	resultSuccess   = "success"
 	resultError     = "error"
 )
@@ -19,6 +20,7 @@ type metrics struct {
 	staleChecks metric.Int64Counter
 	requests    metric.Int64Counter
 	duration    metric.Float64Histogram
+	scanRows    metric.Int64Histogram
 }
 
 func newMetrics(meter metric.Meter, queueSize, activeWorkers func() int64) (*metrics, error) {
@@ -35,6 +37,12 @@ func newMetrics(meter metric.Meter, queueSize, activeWorkers func() int64) (*met
 	duration, err := meter.Float64Histogram("tripgo.position_requests.duration",
 		metric.WithUnit("s"), metric.WithDescription("Duration of Push Service calls"),
 		metric.WithExplicitBucketBoundaries(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5))
+	if err != nil {
+		return nil, err
+	}
+	scanRows, err := meter.Int64Histogram("tripgo.stale_scan.rows",
+		metric.WithUnit("{row}"), metric.WithDescription("Stale trips read by the scanner in one tick"),
+		metric.WithExplicitBucketBoundaries(0, 10, 50, 100, 500, 1000, 5000, 10000))
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +64,7 @@ func newMetrics(meter metric.Meter, queueSize, activeWorkers func() int64) (*met
 	if err != nil {
 		return nil, err
 	}
-	return &metrics{staleChecks: staleChecks, requests: requests, duration: duration}, nil
+	return &metrics{staleChecks: staleChecks, requests: requests, duration: duration, scanRows: scanRows}, nil
 }
 
 func resultAttr(result string) metric.MeasurementOption {

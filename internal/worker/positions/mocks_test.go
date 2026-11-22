@@ -44,18 +44,18 @@ func (m *MockstaleTripFinder) EXPECT() *MockstaleTripFinderMockRecorder {
 }
 
 // FindStale mocks base method.
-func (m *MockstaleTripFinder) FindStale(ctx context.Context, staleAfter time.Duration) ([]model.StaleTrip, error) {
+func (m *MockstaleTripFinder) FindStale(ctx context.Context, staleAfter time.Duration, after *model.StaleTrip, limit int) ([]model.StaleTrip, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FindStale", ctx, staleAfter)
+	ret := m.ctrl.Call(m, "FindStale", ctx, staleAfter, after, limit)
 	ret0, _ := ret[0].([]model.StaleTrip)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // FindStale indicates an expected call of FindStale.
-func (mr *MockstaleTripFinderMockRecorder) FindStale(ctx, staleAfter any) *gomock.Call {
+func (mr *MockstaleTripFinderMockRecorder) FindStale(ctx, staleAfter, after, limit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindStale", reflect.TypeOf((*MockstaleTripFinder)(nil).FindStale), ctx, staleAfter)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindStale", reflect.TypeOf((*MockstaleTripFinder)(nil).FindStale), ctx, staleAfter, after, limit)
 }
 
 // MockpushGateway is a mock of pushGateway interface.

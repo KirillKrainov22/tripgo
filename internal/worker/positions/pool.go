@@ -1,6 +1,7 @@
 package positions
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ type Config struct {
 	StaleAfter     time.Duration
 	Workers        int
 	QueueSize      int
+	BatchSize      int
 	RequestTimeout time.Duration
 }
 
@@ -30,6 +32,8 @@ type task struct {
 	token uint64
 	link  trace.SpanContext
 }
+
+const resultInvalidated = "invalidated"
 
 type Pool struct {
 	cfg       Config
@@ -40,11 +44,15 @@ type Pool struct {
 	tracer    trace.Tracer
 	logger    *slog.Logger
 
-	queue     chan task
+	tasks     taskHeap
+	ready     chan struct{}
 	mu        sync.Mutex
 	pending   map[uuid.UUID]uint64
 	nextToken uint64
 	active    atomic.Int64
+
+	scanCancellations map[uuid.UUID]struct{}
+	scanInvalidated   bool
 
 	stopScan   context.CancelFunc
 	cancelWork context.CancelFunc
@@ -68,12 +76,12 @@ func New(
 		newTicker: newTicker,
 		tracer:    tracerProvider.Tracer("github.com/KirillKrainov22/tripgo/internal/worker/positions"),
 		logger:    logger,
-		queue:     make(chan task, cfg.QueueSize),
+		ready:     make(chan struct{}, cfg.QueueSize),
 		pending:   make(map[uuid.UUID]uint64),
 		scanDone:  make(chan struct{}),
 	}
 	m, err := newMetrics(meter,
-		func() int64 { return int64(len(p.queue)) },
+		func() int64 { return int64(len(p.ready)) },
 		p.active.Load,
 	)
 	if err != nil {
@@ -106,7 +114,7 @@ func (p *Pool) StopScanner() {
 }
 
 func (p *Pool) StopWorkers(ctx context.Context) error {
-	close(p.queue)
+	close(p.ready)
 	done := make(chan struct{})
 	go func() {
 		p.workers.Wait()
@@ -128,6 +136,33 @@ func (p *Pool) Cancel(tripID uuid.UUID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.pending, tripID)
+	if p.scanCancellations == nil || p.scanInvalidated {
+		return
+	}
+	if _, canceled := p.scanCancellations[tripID]; canceled {
+		return
+	}
+	if len(p.scanCancellations) == p.cfg.BatchSize {
+		p.scanInvalidated = true
+		return
+	}
+	p.scanCancellations[tripID] = struct{}{}
+}
+
+func (p *Pool) beginScan() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Keep cancellations across pages: a late coordinate can move a trip past
+	// the pagination cursor and make a later query return the same trip again.
+	p.scanCancellations = make(map[uuid.UUID]struct{})
+	p.scanInvalidated = false
+}
+
+func (p *Pool) endScan() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.scanCancellations = nil
+	p.scanInvalidated = false
 }
 
 func (p *Pool) scanLoop(ctx context.Context) {
@@ -146,41 +181,99 @@ func (p *Pool) scanLoop(ctx context.Context) {
 func (p *Pool) scan(ctx context.Context) {
 	ctx, span := p.tracer.Start(ctx, "positions.scan")
 	defer span.End()
-	trips, err := p.trips.FindStale(ctx, p.cfg.StaleAfter)
-	if err != nil {
-		if ctx.Err() == nil {
-			p.logger.ErrorContext(ctx, "stale trips scan failed", "error", err)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "scan failed")
+	p.beginScan()
+	defer p.endScan()
+	rows := 0
+	defer func() {
+		p.metrics.scanRows.Record(ctx, int64(rows))
+		span.SetAttributes(attribute.Int("tripgo.stale_trips", rows))
+	}()
+	var after *model.StaleTrip
+	for {
+		batch, err := p.trips.FindStale(ctx, p.cfg.StaleAfter, after, p.cfg.BatchSize)
+		if err != nil {
+			if ctx.Err() == nil {
+				p.logger.ErrorContext(ctx, "stale trips scan failed", "error", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, "scan failed")
+			}
+			return
 		}
-		return
-	}
-	span.SetAttributes(attribute.Int("tripgo.stale_trips", len(trips)))
-	for _, item := range trips {
-		result := p.enqueue(item, span.SpanContext())
-		p.metrics.staleChecks.Add(ctx, 1, resultAttr(result))
-		if result == resultDropped {
-			p.metrics.requests.Add(ctx, 1, resultAttr(resultDropped))
-			p.logger.WarnContext(ctx, "position request dropped: queue is full", "trip_id", item.TripID.String())
+		rows += len(batch)
+		if !p.enqueueBatch(ctx, batch, span.SpanContext()) || len(batch) < p.cfg.BatchSize {
+			return
 		}
+		after = &batch[len(batch)-1]
 	}
 }
 
-func (p *Pool) enqueue(item model.StaleTrip, link trace.SpanContext) string {
+func (p *Pool) enqueueBatch(ctx context.Context, batch []model.StaleTrip, link trace.SpanContext) bool {
+	for _, item := range batch {
+		result, evicted := p.enqueue(item, link)
+		if result == resultInvalidated {
+			p.logger.WarnContext(ctx, "position scan invalidated: cancellation limit reached")
+			return false
+		}
+		p.metrics.staleChecks.Add(ctx, 1, resultAttr(result))
+		if evicted != nil {
+			p.metrics.requests.Add(ctx, 1, resultAttr(resultDropped))
+			p.logger.WarnContext(ctx, "position request evicted by a trip silent for longer", "trip_id", evicted.TripID.String())
+		}
+		if result == resultDropped {
+			p.metrics.requests.Add(ctx, 1, resultAttr(resultDropped))
+			p.logger.WarnContext(ctx, "position request dropped: queue is full", "trip_id", item.TripID.String())
+			return false
+		}
+	}
+	return true
+}
+
+func (p *Pool) enqueue(item model.StaleTrip, link trace.SpanContext) (string, *model.StaleTrip) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.scanInvalidated {
+		return resultInvalidated, nil
+	}
+	if _, canceled := p.scanCancellations[item.TripID]; canceled {
+		return resultCancelled, nil
+	}
 	if _, ok := p.pending[item.TripID]; ok {
-		return resultDuplicate
+		return resultDuplicate, nil
 	}
 	p.nextToken++
 	next := task{trip: item, token: p.nextToken, link: link}
-	select {
-	case p.queue <- next:
+	if len(p.tasks) < p.cfg.QueueSize {
+		heap.Push(&p.tasks, next)
 		p.pending[item.TripID] = next.token
-		return resultQueued
-	default:
-		return resultDropped
+		p.ready <- struct{}{}
+		return resultQueued, nil
 	}
+	victim := p.victimIndex()
+	if p.isPendingLocked(p.tasks[victim]) && !item.LastSeenAt.Before(p.tasks[victim].trip.LastSeenAt) {
+		return resultDropped, nil
+	}
+	evicted := p.tasks[victim]
+	heap.Remove(&p.tasks, victim)
+	heap.Push(&p.tasks, next)
+	p.pending[item.TripID] = next.token
+	if p.isPendingLocked(evicted) {
+		delete(p.pending, evicted.trip.TripID)
+		return resultQueued, &evicted.trip
+	}
+	return resultQueued, nil
+}
+
+func (p *Pool) victimIndex() int {
+	victim := 0
+	for i, candidate := range p.tasks {
+		if !p.isPendingLocked(candidate) {
+			return i
+		}
+		if candidate.trip.LastSeenAt.After(p.tasks[victim].trip.LastSeenAt) {
+			victim = i
+		}
+	}
+	return victim
 }
 
 func (p *Pool) work(ctx context.Context) {
@@ -188,11 +281,11 @@ func (p *Pool) work(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case current, ok := <-p.queue:
+		case _, ok := <-p.ready:
 			if !ok {
 				return
 			}
-			if p.isPending(current) {
+			if current, pending := p.next(); pending {
 				p.process(ctx, current)
 				p.forget(current)
 			}
@@ -200,9 +293,15 @@ func (p *Pool) work(ctx context.Context) {
 	}
 }
 
-func (p *Pool) isPending(current task) bool {
+func (p *Pool) next() (task, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	current := p.tasks[0]
+	heap.Pop(&p.tasks)
+	return current, p.isPendingLocked(current)
+}
+
+func (p *Pool) isPendingLocked(current task) bool {
 	token, ok := p.pending[current.trip.TripID]
 	return ok && token == current.token
 }

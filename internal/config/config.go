@@ -34,6 +34,7 @@ type Config struct {
 	PositionStaleAfter    time.Duration
 	PositionWorkers       int
 	PositionQueueSize     int
+	PositionScanBatchSize int
 	PushHTTPURL           string
 	PushRequestTimeout    time.Duration
 }
@@ -135,6 +136,14 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("POSITION_QUEUE_SIZE: must be greater than zero")
 	}
 	cfg.PositionQueueSize = int(queueSize)
+	batchSize, err := integer("POSITION_SCAN_BATCH_SIZE")
+	if err != nil {
+		return Config{}, err
+	}
+	if batchSize <= 0 {
+		return Config{}, fmt.Errorf("POSITION_SCAN_BATCH_SIZE: must be greater than zero")
+	}
+	cfg.PositionScanBatchSize = int(batchSize)
 
 	cfg.PushHTTPURL, err = required("PUSH_HTTP_URL")
 	if err != nil {

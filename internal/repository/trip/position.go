@@ -38,13 +38,16 @@ func (r *Repository) TouchLastPosition(ctx context.Context, id uuid.UUID, record
 	return trip.ErrTripCompleted
 }
 
-func (r *Repository) FindStale(ctx context.Context, staleAfter time.Duration) ([]model.StaleTrip, error) {
+func (r *Repository) FindStale(ctx context.Context, staleAfter time.Duration, after *model.StaleTrip, limit int) ([]model.StaleTrip, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	query, args, err := sq.Select("id", "driver_id", lastSeenExpr).From("trips").
+	builder := sq.Select("id", "driver_id", lastSeenExpr).From("trips").
 		Where(sq.Eq{statusColumn: string(trip.StatusActive)}).
-		Where(lastSeenExpr+" < now() - make_interval(secs => ?)", staleAfter.Seconds()).
-		OrderBy(lastSeenExpr).
+		Where(lastSeenExpr+" < now() - make_interval(secs => ?)", staleAfter.Seconds())
+	if after != nil {
+		builder = builder.Where("("+lastSeenExpr+", id) > (?, ?)", after.LastSeenAt, after.TripID)
+	}
+	query, args, err := builder.OrderBy(lastSeenExpr, "id").Suffix("LIMIT ?", limit).
 		PlaceholderFormat(sq.Dollar).ToSql()
 	if err != nil {
 		return nil, fmt.Errorf("build select stale trips: %w", err)

@@ -12,7 +12,7 @@ import (
 
 type (
 	staleTripFinder interface {
-		FindStale(ctx context.Context, staleAfter time.Duration) ([]model.StaleTrip, error)
+		FindStale(ctx context.Context, staleAfter time.Duration, after *model.StaleTrip, limit int) ([]model.StaleTrip, error)
 	}
 
 	pushGateway interface {
